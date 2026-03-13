@@ -1,24 +1,9 @@
-from . import personal, formalization, training, product, email
+from . import email_report
 
 BOTS = {
-    "personal": {
-        "label": "Personal Problems",
-        "runner": personal.run,
-    },
-    "formalization": {
-        "label": "Problem Formalization",
-        "runner": formalization.run,
-    },
-    "training": {
-        "label": "Generic Training",
-        "runner": training.run,
-    },
-    "product": {
-        "label": "Product Understanding",
-        "runner": product.run,
-    },
-    "email": {
-        "label": "Email Writer",
-        "runner": email.run,
+    "email_report": {
+        "label": "Email Report",
+        "runner": email_report.run,
+        "runner_stream": email_report.run_stream,
     },
 }

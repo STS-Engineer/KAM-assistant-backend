@@ -1,9 +1,12 @@
 # auth.py
 import os
+import base64
+import hashlib
+import logging
+import secrets
 from datetime import datetime, timedelta, timezone
 from jose import jwt, JWTError
-from passlib.context import CryptContext
-import hashlib
+import bcrypt
 from dotenv import load_dotenv
 
 # Chargez les variables d'environnement
@@ -17,41 +20,69 @@ if not SECRET_KEY:
     
 ALGORITHM = "HS256"
 COOKIE_NAME = "access_token"
+REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "refresh_token")
+ACCESS_TOKEN_TTL_MINUTES = int(os.getenv("ACCESS_TOKEN_TTL_MINUTES", "15"))
 
-# Utilisez pbkdf2_sha256 au lieu de bcrypt
-pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+logger = logging.getLogger(__name__)
+
+def _normalize_password(password: str) -> str:
+    """
+    Normalise le mot de passe pour respecter la limite bcrypt (72 octets).
+    Si >72 octets, pr?-hash SHA256 puis encode en base64.
+    """
+    password_bytes = password.encode("utf-8")
+    if len(password_bytes) > 72:
+        sha_hash = hashlib.sha256(password_bytes).digest()
+        return base64.b64encode(sha_hash).decode("ascii")
+    return password
 
 def hash_password(password: str) -> str:
-    """Hash un mot de passe avec pbkdf2_sha256"""
-    return pwd_context.hash(password)
+    normalized = _normalize_password(password)
+    normalized_bytes = normalized.encode("utf-8")
+    if len(normalized_bytes) > 72:
+        raise ValueError("Password normalization failed: >72 bytes")
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(normalized_bytes, salt)
+    return hashed.decode("utf-8")
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Vérifie un mot de passe"""
     try:
-        return pwd_context.verify(plain_password, hashed_password)
-    except:
-        # Fallback SHA256
-        return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
+        normalized = _normalize_password(plain_password)
+        normalized_bytes = normalized.encode("utf-8")
+        hashed_bytes = hashed_password.encode("utf-8")
+        return bcrypt.checkpw(normalized_bytes, hashed_bytes)
+    except Exception as e:
+        logger.error(f"Password verification error: {e}")
+        return False
 
-def create_token(subject_email: str) -> str:
-    """Crée un token JWT"""
-    exp = datetime.now(timezone.utc) + timedelta(hours=8)
-    
-    # Assurez-vous que la clé est une chaîne
+def create_access_token(subject_email: str) -> str:
+    exp = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_TTL_MINUTES)
+
+    # Assurez-vous que la cl? est une cha?ne
     key = str(SECRET_KEY)
-    
-    # Debug
-    print(f"🔐 Création token pour: {subject_email}")
-    print(f"🔐 Clé utilisée: {key[:10]}... (longueur: {len(key)})")
-    
+
     return jwt.encode(
-        {"sub": subject_email, "exp": exp}, 
-        key, 
-        algorithm=ALGORITHM
+        {"sub": subject_email, "exp": exp, "typ": "access"},
+        key,
+        algorithm=ALGORITHM,
     )
 
+
+def create_token(subject_email: str) -> str:
+    return create_access_token(subject_email)
+
+
+def generate_refresh_token() -> str:
+    return secrets.token_urlsafe(64)
+
+
+def hash_refresh_token(token: str) -> str:
+    key = str(SECRET_KEY)
+    raw = f"{token}:{key}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def decode_token(token: str) -> str | None:
-    """Décode et valide un token JWT"""
     try:
         key = str(SECRET_KEY)
         payload = jwt.decode(token, key, algorithms=[ALGORITHM])
