@@ -993,6 +993,25 @@ def _wants_body(message: str) -> bool:
     return any(re.search(p, text) for p in patterns)
 
 
+def _wants_attachments(message: str) -> bool:
+    if not message:
+        return False
+    text = message.lower()
+    patterns = [
+        r"\battachment\b",
+        r"\battachments\b",
+        r"\battachement\b",
+        r"\battachements\b",
+        r"\battached file\b",
+        r"\battached files\b",
+        r"\bpi[eè]ce\s+jointe\b",
+        r"\bpi[eè]ces\s+jointes\b",
+        r"\bfichier\s+joint\b",
+        r"\bfichiers\s+joints\b",
+    ]
+    return any(re.search(p, text) for p in patterns)
+
+
 def _message_has_explicit_date(message: str) -> bool:
     if not message:
         return False
@@ -1116,6 +1135,7 @@ def _should_clear_dates_for_full_report(message: str) -> bool:
 def _format_email_details(
     rows,
     include_body: bool = False,
+    attachment_groups: list[tuple[list[dict], bool]] | None = None,
     limit: int | None = None,
 ) -> str:
     if not rows:
@@ -1151,6 +1171,16 @@ def _format_email_details(
             if body_raw:
                 body = _wrap_value(_normalize_links(body_raw))
                 parts.append(f"Body: {body}")
+
+        if attachment_groups is not None and idx - 1 < len(attachment_groups):
+            attachments, has_link = attachment_groups[idx - 1]
+            if not has_link:
+                parts.append("Attachments: Not available.")
+            elif attachments:
+                parts.append("Attachments:")
+                parts.append(build_rows_block(attachments, ATTACHMENT_SNIPPET_KEYS, limit=20))
+            else:
+                parts.append("Attachments: None.")
 
         lines.append("\n".join(parts))
 
@@ -1199,7 +1229,12 @@ def _extract_email_reference(message: str) -> dict | None:
     if index < 1:
         return None
     wants_body = _wants_body(message)
-    return {"index": index, "wants_body": wants_body}
+    wants_attachments = _wants_attachments(message)
+    return {
+        "index": index,
+        "wants_body": wants_body,
+        "wants_attachments": wants_attachments,
+    }
 
 
 def _get_previous_user_message(history: list[dict], current_message: str) -> str | None:
@@ -1287,7 +1322,7 @@ def run(message: str, session: dict) -> str:
             email_ref["index"],
             include_body=email_ref["wants_body"],
         )
-        if email_ref["wants_body"]:
+        if email_ref["wants_body"] or email_ref.get("wants_attachments"):
             attachments_table = tables.get("attachments")
             attachments_block = ""
             if attachments_table is not None:
@@ -1373,11 +1408,13 @@ def run(message: str, session: dict) -> str:
     )
 
     include_body = _wants_body(query)
+    include_attachment_details = _wants_attachments(query)
 
     if want_search:
         emails = []
         attachments = []
         attachments_count = 0
+        attachment_groups = None
         if include_emails:
             emails = _search_rows(
                 tables["emails"],
@@ -1410,11 +1447,24 @@ def run(message: str, session: dict) -> str:
                 )
                 attachments_count = len(attachments)
 
+            if include_emails and emails and include_attachment_details:
+                attachment_groups = []
+                for email_row in emails:
+                    email_attachments, has_link = _get_attachments_for_email(attachments_table, email_row)
+                    attachment_groups.append((email_attachments, has_link))
+
         lines.append(f"Results: {len(emails)} emails, {attachments_count} attachments.")
         lines.append(f"Filters: {filters_summary}")
         if emails:
             lines.append("Email details:")
-            lines.append(_format_email_details(emails, include_body=include_body, limit=None))
+            lines.append(
+                _format_email_details(
+                    emails,
+                    include_body=include_body,
+                    attachment_groups=attachment_groups,
+                    limit=None,
+                )
+            )
         if attachments and not include_emails:
             lines.append("Attachment examples:")
             lines.append(build_rows_block(attachments, ATTACHMENT_SNIPPET_KEYS))

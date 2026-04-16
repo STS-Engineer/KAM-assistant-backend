@@ -21,9 +21,9 @@ EMAIL_SNIPPET_KEYS = [
 ]
 
 ATTACHMENT_SNIPPET_KEYS = [
+    "attachment_id",
     "file_name",
     "local_file_path",
-    "extracted_content",
 ]
 
 

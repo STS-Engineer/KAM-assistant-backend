@@ -48,6 +48,13 @@ from email_data import (
     search_table as search_email_table,
     search_table_with_filters,
 )
+from azure_attachments import (
+    AttachmentAmbiguousError,
+    AttachmentNotFoundError,
+    AttachmentStorageError,
+    azure_storage_enabled,
+    open_attachment_download,
+)
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -559,7 +566,7 @@ def root():
 
 def email_table_or_404(name: str):
     table = get_email_table(name)
-    if not table:
+    if table is None:
         raise HTTPException(status_code=404, detail=f"Table not found: {name}")
     return table
 
@@ -571,6 +578,40 @@ def parse_date_param(value: str | None, label: str):
         return datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid {label}. Use YYYY-MM-DD.")
+
+
+def serialize_attachment_row(row: dict):
+    item = dict(row or {})
+    attachment_id = item.get("attachment_id")
+    if attachment_id is not None:
+        item["download_url"] = f"/api/attachments/{attachment_id}/download"
+    item["azure_storage_enabled"] = azure_storage_enabled()
+    return item
+
+
+def build_attachment_stream_response(local_file_path: str | None, file_name: str | None = None):
+    if not azure_storage_enabled():
+        raise HTTPException(status_code=503, detail="Azure attachment storage is not configured")
+
+    try:
+        download = open_attachment_download(local_file_path=local_file_path, file_name=file_name)
+    except AttachmentNotFoundError:
+        raise HTTPException(status_code=404, detail="Attachment blob not found in Azure storage")
+    except AttachmentAmbiguousError:
+        raise HTTPException(status_code=409, detail="Multiple Azure blobs match this attachment")
+    except AttachmentStorageError:
+        raise HTTPException(status_code=502, detail="Azure attachment storage is unavailable")
+
+    headers = dict(download["headers"])
+    content_length = download.get("content_length")
+    if content_length is not None:
+        headers["Content-Length"] = str(content_length)
+
+    return StreamingResponse(
+        download["chunks"],
+        media_type=download["content_type"],
+        headers=headers,
+    )
 
 
 # ==============================
@@ -615,7 +656,43 @@ def list_attachments(
     require_user(request)
     table = email_table_or_404("attachments")
     statement = select(table).limit(limit).offset(offset)
-    return {"items": run_email_query(statement), "limit": limit, "offset": offset}
+    items = [serialize_attachment_row(row) for row in run_email_query(statement)]
+    return {"items": items, "limit": limit, "offset": offset}
+
+
+@app.get("/api/attachments/download")
+def download_attachment_from_path(
+    request: Request,
+    local_file_path: str = Query(..., min_length=1),
+    file_name: str | None = Query(None),
+):
+    require_user(request)
+    return build_attachment_stream_response(local_file_path=local_file_path, file_name=file_name)
+
+
+@app.get("/api/attachments/{attachment_id}/download")
+def download_attachment_by_id(attachment_id: int, request: Request):
+    require_user(request)
+    table = email_table_or_404("attachments")
+
+    id_column = None
+    for candidate in ["attachment_id", "id"]:
+        if candidate in table.c:
+            id_column = table.c[candidate]
+            break
+
+    if id_column is None:
+        raise HTTPException(status_code=400, detail="Attachment id column not found")
+
+    rows = run_email_query(select(table).where(id_column == attachment_id).limit(1))
+    if not rows:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    attachment = rows[0]
+    return build_attachment_stream_response(
+        local_file_path=attachment.get("local_file_path"),
+        file_name=attachment.get("file_name"),
+    )
 
 
 @app.get("/api/emails/{message_id}")
@@ -637,7 +714,7 @@ def get_email(message_id: str, request: Request):
         attachment_statement = select(attachment_table).where(
             attachment_table.c.message_id == message_id
         )
-        attachments = run_email_query(attachment_statement)
+        attachments = [serialize_attachment_row(row) for row in run_email_query(attachment_statement)]
 
     return {"email": rows[0], "attachments": attachments}
 
@@ -665,7 +742,10 @@ def email_search(
             date_to=date_to_value,
         )
     if "attachments" in tables:
-        results["attachments"] = search_email_table(tables["attachments"], q, limit)
+        results["attachments"] = [
+            serialize_attachment_row(row)
+            for row in search_email_table(tables["attachments"], q, limit)
+        ]
 
     return results
 

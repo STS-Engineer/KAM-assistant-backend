@@ -7,3 +7,4 @@ bcrypt
 python-jose
 openai
 pydantic
+azure-storage-blob
